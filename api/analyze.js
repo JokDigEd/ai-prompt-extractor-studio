@@ -60,9 +60,30 @@ async function callClaude(prompt, images, json) {
   return (d.content || []).filter(b => b.type === "text").map(b => b.text).join("");
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Coba ulang otomatis saat Google sibuk (500/503), lalu model cadangan jika GEMINI_FALLBACK_MODEL diisi.
 async function callGemini(prompt, images, json) {
-  const key = process.env.GEMINI_API_KEY, model = process.env.GEMINI_MODEL;
-  if (!key || !model) throw Object.assign(new Error("GEMINI_API_KEY/GEMINI_MODEL kosong"), { code: "CONFIG" });
+  const key = process.env.GEMINI_API_KEY, primary = process.env.GEMINI_MODEL;
+  if (!key || !primary) throw Object.assign(new Error("GEMINI_API_KEY/GEMINI_MODEL kosong"), { code: "CONFIG" });
+  const models = [primary];
+  const fb = process.env.GEMINI_FALLBACK_MODEL;
+  if (fb && fb !== primary) models.push(fb);
+  let last;
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { return await geminiOnce(model, key, prompt, images, json); }
+      catch (e) {
+        last = e;
+        if (e.status === 500 || e.status === 503) { if (attempt === 0) await sleep(2000); continue; }
+        break; // error lain: lanjut ke model cadangan (jika ada)
+      }
+    }
+  }
+  throw last;
+}
+
+async function geminiOnce(model, key, prompt, images, json) {
   const url = "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent";
   const r = await fetch(url, {
     method: "POST",
