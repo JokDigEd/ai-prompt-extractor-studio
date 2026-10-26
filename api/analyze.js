@@ -8,9 +8,16 @@ const MAX_IMAGE_B64 = 4_000_000; // ~3 MB per gambar (base64)
 module.exports = async (req, res) => {
   if (req.method !== "POST") return res.status(405).json({ error: "Gunakan metode POST." });
 
-  const required = process.env.ACCESS_CODE;
-  if (required && req.headers["x-access-code"] !== required) {
-    return res.status(401).json({ error: "Kode akses salah atau belum diisi (menu Settings)." });
+  // Mode 1: API key pribadi pengguna (dipakai untuk permintaan ini saja, tidak disimpan/dicatat).
+  // Mode 2: key milik server, hanya dengan kode akses (dan hanya jika ACCESS_CODE diatur).
+  const user = readUserCreds(req);
+  if (user.error) return res.status(400).json({ error: user.error });
+  if (!user.key) {
+    const required = process.env.ACCESS_CODE;
+    if (!required) return res.status(403).json({ error: "Mode server dinonaktifkan. Isi API key pribadi di menu Settings." });
+    if (req.headers["x-access-code"] !== required) {
+      return res.status(401).json({ error: "Kode akses salah atau belum diisi. Isi kode akses, atau pakai API key pribadi di menu Settings." });
+    }
   }
 
   const { prompt, images = [], json = false } = req.body || {};
@@ -27,27 +34,29 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const provider = (process.env.PROVIDER || "gemini").toLowerCase();
+    const provider = user.key ? user.provider : (process.env.PROVIDER || "gemini").toLowerCase();
+    const cfg = { key: user.key || "", model: user.model || "" };
     const text = provider === "claude"
-      ? await callClaude(prompt, images, json)
-      : await callGemini(prompt, images, json);
+      ? await callClaude(prompt, images, json, cfg)
+      : await callGemini(prompt, images, json, cfg);
     return res.status(200).json({ text });
   } catch (e) {
-    console.error("analyze error:", e.message); // tidak mencatat key atau gambar
+    const m = String(e.message).split(user.key || "\u0000").join("***"); // sembunyikan key pengguna
+    console.error("analyze error:", m);
     if (e.status === 429) return res.status(429).json({ error: "Batas pemakaian model tercapai. Coba lagi nanti." });
-    if (e.code === "CONFIG") return res.status(500).json({ error: "Server belum dikonfigurasi (cek Environment Variables)." });
-    return res.status(502).json({ error: "Penyedia model gagal merespons. [" + String(e.message).slice(0, 250) + "]" });
+    if (e.code === "CONFIG") return res.status(500).json({ error: "Server belum dikonfigurasi (cek Environment Variables, atau isi ID model di Settings)." });
+    return res.status(502).json({ error: "Penyedia model gagal merespons. [" + m.slice(0, 250) + "]" });
   }
 };
 
-async function callClaude(prompt, images, json) {
-  const key = process.env.ANTHROPIC_API_KEY;
+async function callClaude(prompt, images, json, cfg) {
+  const key = cfg.key || process.env.ANTHROPIC_API_KEY;
   if (!key) throw Object.assign(new Error("ANTHROPIC_API_KEY kosong"), { code: "CONFIG" });
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
     body: JSON.stringify({
-      model: process.env.CLAUDE_MODEL || "claude-sonnet-5-5",
+      model: cfg.model || process.env.CLAUDE_MODEL || "claude-sonnet-5-5",
       max_tokens: json ? 8000 : 2000,
       messages: [{ role: "user", content: [
         ...images.map(i => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } })),
@@ -63,8 +72,8 @@ async function callClaude(prompt, images, json) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Coba ulang otomatis saat Google sibuk (500/503), lalu model cadangan jika GEMINI_FALLBACK_MODEL diisi.
-async function callGemini(prompt, images, json) {
-  const key = process.env.GEMINI_API_KEY, primary = process.env.GEMINI_MODEL;
+async function callGemini(prompt, images, json, cfg) {
+  const key = cfg.key || process.env.GEMINI_API_KEY, primary = cfg.model || process.env.GEMINI_MODEL;
   if (!key || !primary) throw Object.assign(new Error("GEMINI_API_KEY/GEMINI_MODEL kosong"), { code: "CONFIG" });
   const models = [primary];
   const fb = process.env.GEMINI_FALLBACK_MODEL;
@@ -107,4 +116,15 @@ async function providerError(name, r) {
   let msg = "";
   try { msg = (await r.text()).replace(/\s+/g, " ").replace(/AIza[0-9A-Za-z_-]{20,}/g, "***").slice(0, 200); } catch (_) {}
   return Object.assign(new Error(name + " " + r.status + ": " + msg), { status: r.status });
+}
+
+function readUserCreds(req) {
+  const key = String(req.headers["x-user-key"] || "").trim();
+  if (!key) return {};
+  const provider = String(req.headers["x-user-provider"] || "gemini").toLowerCase();
+  const model = String(req.headers["x-user-model"] || "").trim();
+  if (!/^[\w.:~-]{8,400}$/.test(key)) return { error: "Format API key tidak valid." };
+  if (provider !== "gemini" && provider !== "claude") return { error: "Penyedia tidak dikenal." };
+  if (model && !/^[A-Za-z0-9._-]{1,80}$/.test(model)) return { error: "ID model tidak valid." };
+  return { key, provider, model };
 }
