@@ -36,7 +36,7 @@ module.exports = async (req, res) => {
     console.error("analyze error:", e.message); // tidak mencatat key atau gambar
     if (e.status === 429) return res.status(429).json({ error: "Batas pemakaian model tercapai. Coba lagi nanti." });
     if (e.code === "CONFIG") return res.status(500).json({ error: "Server belum dikonfigurasi (cek Environment Variables)." });
-    return res.status(502).json({ error: "Penyedia model gagal merespons." });
+    return res.status(502).json({ error: "Penyedia model gagal merespons. [" + String(e.message).slice(0, 250) + "]" });
   }
 };
 
@@ -55,7 +55,7 @@ async function callClaude(prompt, images, json) {
       ] }]
     })
   });
-  if (!r.ok) throw Object.assign(new Error("claude " + r.status), { status: r.status });
+  if (!r.ok) throw await providerError("claude", r);
   const d = await r.json();
   return (d.content || []).filter(b => b.type === "text").map(b => b.text).join("");
 }
@@ -75,8 +75,15 @@ async function callGemini(prompt, images, json) {
       generationConfig: json ? { responseMimeType: "application/json" } : {}
     })
   });
-  if (!r.ok) throw Object.assign(new Error("gemini " + r.status), { status: r.status });
+  if (!r.ok) throw await providerError("gemini", r);
   const d = await r.json();
   return ((d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [])
     .map(p => p.text || "").join("");
+}
+
+// Membaca pesan error dari penyedia (tanpa key) agar mudah didiagnosis.
+async function providerError(name, r) {
+  let msg = "";
+  try { msg = (await r.text()).replace(/\s+/g, " ").replace(/AIza[0-9A-Za-z_-]{20,}/g, "***").slice(0, 200); } catch (_) {}
+  return Object.assign(new Error(name + " " + r.status + ": " + msg), { status: r.status });
 }
