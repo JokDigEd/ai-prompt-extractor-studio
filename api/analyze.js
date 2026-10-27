@@ -12,7 +12,8 @@ module.exports = async (req, res) => {
   // Mode 2: key milik server, hanya dengan kode akses (dan hanya jika ACCESS_CODE diatur).
   const user = readUserCreds(req);
   if (user.error) return res.status(400).json({ error: user.error });
-  if (!user.key) {
+  const bearer = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!user.key && !bearer) {
     const required = process.env.ACCESS_CODE;
     if (!required) return res.status(403).json({ error: "Mode server dinonaktifkan. Isi API key pribadi di menu Settings." });
     if (req.headers["x-access-code"] !== required) {
@@ -33,16 +34,24 @@ module.exports = async (req, res) => {
     if (!ok) return res.status(400).json({ error: "Format atau ukuran gambar tidak valid." });
   }
 
+  // Mode akun: login Supabase + jatah harian (memakai key server). Jatah dipotong dulu, dikembalikan jika gagal.
+  let acct = null;
+  if (!user.key && bearer) {
+    acct = await accountGate(bearer);
+    if (acct.error) return res.status(acct.status).json({ error: acct.error, quota_exceeded: !!acct.quotaExceeded });
+  }
+
   try {
     const provider = user.key ? user.provider : (process.env.PROVIDER || "gemini").toLowerCase();
     const cfg = { key: user.key || "", model: user.model || "" };
     const text = provider === "claude"
       ? await callClaude(prompt, images, json, cfg)
       : await callGemini(prompt, images, json, cfg);
-    return res.status(200).json({ text });
+    return res.status(200).json(acct ? { text, quota: acct.quota } : { text });
   } catch (e) {
     const m = String(e.message).split(user.key || "\u0000").join("***"); // sembunyikan key pengguna
     console.error("analyze error:", m);
+    if (acct && acct.user) await rpc("refund_quota", { p_user: acct.user.id }).catch(() => {});
     if (e.status === 429) return res.status(429).json({ error: "Batas pemakaian model tercapai. Coba lagi nanti." });
     if (e.code === "CONFIG") return res.status(500).json({ error: "Server belum dikonfigurasi (cek Environment Variables, atau isi ID model di Settings)." });
     return res.status(502).json({ error: "Penyedia model gagal merespons. [" + m.slice(0, 250) + "]" });
@@ -127,4 +136,50 @@ function readUserCreds(req) {
   if (provider !== "gemini" && provider !== "claude") return { error: "Penyedia tidak dikenal." };
   if (model && !/^[A-Za-z0-9._-]{1,80}$/.test(model)) return { error: "ID model tidak valid." };
   return { key, provider, model };
+}
+
+// ---------- Supabase: verifikasi login + jatah harian ----------
+function sbEnv() {
+  return {
+    url: (process.env.SUPABASE_URL || "").replace(/\/$/, ""),
+    anon: process.env.SUPABASE_ANON_KEY || "",
+    svc: process.env.SUPABASE_SERVICE_ROLE_KEY || ""
+  };
+}
+
+async function rpc(name, body) {
+  const { url, svc } = sbEnv();
+  const headers = { "content-type": "application/json", apikey: svc };
+  if (svc.startsWith("eyJ")) headers.Authorization = "Bearer " + svc; // kunci lama berbentuk JWT
+  const r = await fetch(url + "/rest/v1/rpc/" + name, { method: "POST", headers, body: JSON.stringify(body) });
+  if (!r.ok) return null;
+  return r.json().catch(() => null);
+}
+
+async function accountGate(token) {
+  const { url, anon, svc } = sbEnv();
+  if (!url || !anon || !svc) return { status: 503, error: "Mode akun belum dikonfigurasi di server." };
+  let u;
+  try {
+    const r = await fetch(url + "/auth/v1/user", { headers: { apikey: anon, Authorization: "Bearer " + token } });
+    if (!r.ok) return { status: 401, error: "Sesi login tidak valid. Masuk lagi di Settings." };
+    u = await r.json();
+  } catch (_) {
+    return { status: 502, error: "Tidak bisa memeriksa login." };
+  }
+  if (!u || !u.id) return { status: 401, error: "Sesi login tidak valid. Masuk lagi di Settings." };
+
+  const limit = Math.max(1, parseInt(process.env.DAILY_LIMIT, 10) || 5);
+  const global = Math.max(1, parseInt(process.env.GLOBAL_DAILY_LIMIT, 10) || 100);
+  const q = await rpc("consume_quota", { p_user: u.id, p_limit: limit, p_global: global });
+  if (!q) return { status: 502, error: "Gagal memeriksa jatah harian." };
+  if (!q.ok) {
+    return {
+      status: 429, quotaExceeded: true,
+      error: q.reason === "global"
+        ? "Kapasitas harian aplikasi sudah penuh. Coba lagi besok, atau pakai API key pribadi di Settings."
+        : "Jatah harian Anda (" + limit + " analisis) sudah habis. Coba lagi besok, atau pakai API key pribadi di Settings."
+    };
+  }
+  return { user: u, quota: { used: q.used, limit, remaining: Math.max(0, limit - q.used) } };
 }
