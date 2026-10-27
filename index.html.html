@@ -124,7 +124,7 @@ ul{margin:6px 0 0;padding-left:18px}li{margin:3px 0}
     <div id="out"></div>
   </div>
 
-  <div id="v-hist" class="hide card"><h3>Riwayat</h3><div id="histList"></div><button id="clrH" style="margin-top:12px">Clear History</button></div>
+  <div id="v-hist" class="hide card"><h3>Riwayat</h3><div id="histList"></div><div id="cloudBox"></div><button id="clrH" style="margin-top:12px">Clear History</button></div>
   <div id="v-set" class="hide card">
     <h3>Pengaturan</h3>
     <div class="kv"><b>Native AI</b><span id="s1"></span><b>Connected AI</b><span>Belum tersedia di versi ini. Antarmuka siap diintegrasikan lewat fungsi <code>AnalysisService.run</code>; API key tidak pernah disimpan di frontend.</span><b>Demo Mode</b><span>Memakai contoh hasil berlabel DEMO, bukan analisis sungguhan.</span><b>Penyimpanan</b><span>localStorage hanya untuk teks prompt, bukan enkripsi. Jangan menaruh informasi sensitif di konteks tambahan.</span></div>
@@ -140,6 +140,7 @@ ul{margin:6px 0 0;padding-left:18px}li{margin:3px 0}
         <div class="msg warn" style="font-size:12px">Key dipakai hanya untuk permintaan Anda dan tidak disimpan oleh server aplikasi. Secara bawaan key hanya bertahan selama tab terbuka. Buat key khusus untuk aplikasi ini, atur batas biaya di konsol penyedia, dan hapus key jika sudah tidak dipakai. Gemini: aistudio.google.com. Claude: console.anthropic.com.</div>
       </div>
       <div id="srvBox" class="hide"><label for="accCode">Kode akses (dari pemilik aplikasi)</label><input type="text" id="accCode" autocomplete="off" maxlength="100"></div>
+      <div id="acctBox" class="hide"></div>
     </div>
   </div>
 </main>
@@ -151,7 +152,7 @@ ul{margin:6px 0 0;padding-left:18px}li{margin:3px 0}
 const $=id=>document.getElementById(id);
 const PLATFORMS={"General AI Image Generator":"Natural descriptive sentences, subject first, then setting, light, style.","Midjourney":"Concise comma-separated descriptive phrases; parameters like --ar may be appended only for the user's chosen aspect ratio.","Google Flow / Veo":"Cinematic natural-language scene with explicit subject, action, camera movement and ambience.","Kling AI":"Clear subject-action-camera description in plain language; keep motion simple and physically plausible.","Runway":"Short direct description of subject, camera motion and lighting; avoid long lists.","Flux-compatible general prompt":"Rich natural-language sentences describing everything explicitly; no weight syntax.","Custom Prompt":"Neutral, platform-agnostic structure."};
 const MAX_IMG=10*1024*1024,MAX_VID=200*1024*1024,IMG_T=["image/jpeg","image/png","image/webp","image/gif"],VID_T=["video/mp4","video/webm","video/quicktime"];
-const S={view:"work",kind:"image",items:[],video:null,res:null,demo:false,tab:0,hist:[],edits:{},cmp:{},busy:false,sample:null,imgOK:false};
+const S={view:"work",kind:"image",items:[],video:null,res:null,demo:false,tab:0,hist:[],edits:{},cmp:{},cloud:true,busy:false,sample:null,imgOK:false};
 const TABS=["⭐ Prompt Referensi","Overview","Visual DNA","Main Prompt","Cinematic Prompt","Video Timeline","Negative Prompt","Variations","Technical Details"];
 
 /* ---------- helpers ---------- */
@@ -239,9 +240,10 @@ function realismize(r){const mode=AnalysisSettings.read().realism;const photo=mo
   if(r.prompts&&r.prompts.negative)r.prompts.negative+=", illustration, cartoon, vector art, 3D render, plastic skin";r.realism="photo";return r}
 function realismKey(key,t){return S.res&&S.res.realism==="photo"&&REAL_K.includes(key)&&t&&!/photorealistic/i.test(t)?REAL_P+t+REAL_A:t}
 function blobB64(b){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(b)})}
-async function apiCall(prompt,blobs,json){const images=await Promise.all(blobs.map(async b=>({mime:b.type||"image/jpeg",data:await blobB64(b)})));const cfg=getAiCfg();if(cfg.own&&!cfg.key)throw new Error("Isi API key pribadi di menu Settings (atau pilih Server aplikasi dan isi kode akses).");const hd={"Content-Type":"application/json"};if(cfg.own){hd["x-user-key"]=cfg.key;hd["x-user-provider"]=cfg.prov;if(cfg.model)hd["x-user-model"]=cfg.model}else hd["x-access-code"]=cfg.code;
+async function apiCall(prompt,blobs,json){const images=await Promise.all(blobs.map(async b=>({mime:b.type||"image/jpeg",data:await blobB64(b)})));const cfg=getAiCfg();if(cfg.own&&!cfg.key)throw new Error("Isi API key pribadi di menu Settings (atau pilih Server aplikasi dan isi kode akses).");const hd={"Content-Type":"application/json"};if(cfg.src==="acct"){const tk=await getToken();if(!tk)throw new Error("Masuk dulu di Settings (Akun saya) untuk memakai jatah harian.");hd.Authorization="Bearer "+tk}else if(cfg.own){hd["x-user-key"]=cfg.key;hd["x-user-provider"]=cfg.prov;if(cfg.model)hd["x-user-model"]=cfg.model}else hd["x-access-code"]=cfg.code;
   let r;try{r=await fetch("/api/analyze",{method:"POST",headers:hd,body:JSON.stringify({prompt,images,json})})}catch(e){throw new Error("Tidak bisa menghubungi server. Periksa koneksi.")}
-  const d=await r.json().catch(()=>({}));if(!r.ok)throw Object.assign(new Error(d.error||"Server error "+r.status),{code:r.status===429?"rate_limited":"api"});
+  const d=await r.json().catch(()=>({}));if(!r.ok)throw Object.assign(new Error(d.error||"Server error "+r.status),{code:d.quota_exceeded?"quota":r.status===429?"rate_limited":"api"});
+  if(d.quota){S.quota=d.quota;renderAcct()}
   if(!json)return d.text||"";return JSON.parse((d.text||"").replace(/```json|```/g,"").trim())}
 const AnalysisService={
   buildPrompt(o){const plat=AnalysisSettings.read().platform;return `You are a visual analyst and prompt engineer. Analyze the attached ${S.kind==="video"?`${o.n} frames sampled in order from a video (timestamps: ${o.times.join(", ")||"unknown"}). Only describe what the sampled frames show; do not claim to have seen the whole video; never invent timestamps or motion that cannot be inferred from these frames`:"image"}.
@@ -264,8 +266,8 @@ async function analyze(demo){if(S.busy)return;msg("");
   if(!demo){if(!S.items.length&&!S.video)return msg("err","Unggah media terlebih dahulu.");if(S.video&&!S.items.length)return msg("err","Klik “Ekstrak frame” dulu agar frame dapat dianalisis.");
     if(!S.sample&&!S.api)return msg("err","Fitur AI belum terhubung di tampilan ini. Gunakan Mode Demo (berlabel DEMO) untuk mencoba antarmuka.");if(!S.imgOK)return msg("err","Runtime ini belum mendukung input gambar untuk AI.")}
   S.busy=true;S.demo=demo;badge();$("go").disabled=true;skeleton();
-  try{S.res=realismize(demo?AnalysisService.demo():await AnalysisService.run());S.tab=0;S.edits={};S.cmp={};if(!demo)pushHist();render()}
-  catch(e){$("out").replaceChildren();msg("err",e&&e.code==="not_granted"?"Izin AI ditolak. Analisis dibatalkan; tidak ada data dikirim.":e&&e.code==="rate_limited"?"Batas permintaan tercapai. Coba lagi nanti.":"Analisis gagal: "+(e&&e.message||"respons tidak valid")+". Coba lagi.")}
+  try{S.res=realismize(demo?AnalysisService.demo():await AnalysisService.run());S.tab=0;S.edits={};S.cmp={};if(!demo){pushHist();saveCloud()}render()}
+  catch(e){$("out").replaceChildren();msg("err",e&&e.code==="not_granted"?"Izin AI ditolak. Analisis dibatalkan; tidak ada data dikirim.":e&&e.code==="quota"?e.message:e&&e.code==="rate_limited"?"Batas permintaan tercapai. Coba lagi nanti.":"Analisis gagal: "+(e&&e.message||"respons tidak valid")+". Coba lagi.")}
   finally{S.busy=false;$("go").disabled=false;badge()}}
 $("go").onclick=()=>analyze(false);$("demoBtn").onclick=()=>analyze(true);
 $("reset").onclick=()=>{if(S.res&&!confirm("Hapus hasil analisis saat ini?"))return;S.res=null;$("out").replaceChildren();S.demo=false;badge()};
@@ -292,7 +294,7 @@ const LOC={rp_flowimg:["replica","flowimg"],rp_chatgpt:["replica","chatgpt"],rp_
 function setPrompt(key,t){const[g,k]=LOC[key]||["prompts",key];S.res[g][k]=t}
 async function regenPrompt(key,btn,cur,ins){if(!S.sample&&!S.api)return toast("AI belum terhubung");const old=btn.textContent;btn.disabled=true;btn.textContent="Membuat…";
   try{const t=realismKey(key,await AnalysisService.regenerate(key,cur,ins));if(!t)throw new Error("kosong");S.cmp[key]={old:cur,neu:t,ins};render()}
-  catch(e){toast(e&&e.code==="not_granted"?"Izin AI ditolak":e&&e.code==="rate_limited"?"Batas permintaan tercapai, coba lagi nanti":"Gagal membuat ulang prompt");btn.disabled=false;btn.textContent=old}}
+  catch(e){toast(e&&e.code==="quota"?e.message:e&&e.code==="not_granted"?"Izin AI ditolak":e&&e.code==="rate_limited"?"Batas permintaan tercapai, coba lagi nanti":"Gagal membuat ulang prompt");btn.disabled=false;btn.textContent=old}}
 Components.PromptCard={pcard,regenPrompt,setPrompt,cmpView};Object.assign(window,Components.PromptCard);
 })();
 
@@ -337,9 +339,42 @@ Components.ResultsDashboard={render};Object.assign(window,Components.ResultsDash
 function loadHist(){try{S.hist=JSON.parse(localStorage.getItem("apes_hist")||"[]")}catch(e){S.hist=[]}}
 function saveHist(){try{localStorage.setItem("apes_hist",JSON.stringify(S.hist))}catch(e){}}
 function pushHist(){if(!$("saveH").checked)return;S.hist.unshift({d:new Date().toISOString(),kind:S.kind,platform:AnalysisSettings.read().platform,detail:AnalysisSettings.read().detail,res:S.res});S.hist=S.hist.slice(0,15);saveHist()}
-function renderHist(){const l=$("histList");l.replaceChildren(...(S.hist.length?S.hist.map((h,i)=>el("div",{class:"hist"},el("span",{},new Date(h.d).toLocaleString()+" · "+h.kind+" · "+h.platform+" · "+h.detail),el("span",{},el("button",{onclick:()=>{S.res=h.res;S.demo=false;S.kind=h.kind;S.edits={};S.cmp={};S.tab=0;S.view="work";show();render()}},"Buka")," ",el("button",{onclick:()=>{S.hist.splice(i,1);saveHist();renderHist()}},"Hapus")))):[el("div",{class:"empty"},"Belum ada riwayat.")]))}
+function renderHist(){loadCloudHist();const l=$("histList");l.replaceChildren(...(S.hist.length?S.hist.map((h,i)=>el("div",{class:"hist"},el("span",{},new Date(h.d).toLocaleString()+" · "+h.kind+" · "+h.platform+" · "+h.detail),el("span",{},el("button",{onclick:()=>{S.res=h.res;S.demo=false;S.kind=h.kind;S.edits={};S.cmp={};S.tab=0;S.view="work";show();render()}},"Buka")," ",el("button",{onclick:()=>{S.hist.splice(i,1);saveHist();renderHist()}},"Hapus")))):[el("div",{class:"empty"},"Belum ada riwayat.")]))}
 $("clrH").onclick=()=>{if(S.hist.length&&confirm("Hapus seluruh riwayat?")){S.hist=[];saveHist();renderHist()}};
 Components.HistoryPanel={loadHist,saveHist,pushHist,renderHist};Object.assign(window,Components.HistoryPanel);
+})();
+
+/* ===== Component: AccountPanel (Supabase: login, jatah, riwayat akun) ===== */
+(function(){
+let sb=null;
+function loadScript(src){return new Promise(r=>{const e=document.createElement("script");e.src=src;e.onload=()=>r(true);e.onerror=()=>r(false);document.head.append(e)})}
+async function initAccount(){if(window.claude)return;await loadScript("config.js");const c=window.APES_CFG||{};
+  if(!c.supabaseUrl||!c.supabaseAnonKey||/ISI-/.test(c.supabaseUrl))return;
+  if(!(await loadScript("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.js"))||!window.supabase)return;
+  sb=window.supabase.createClient(c.supabaseUrl,c.supabaseAnonKey,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+  const{data}=await sb.auth.getSession();S.user=data.session?data.session.user:null;
+  sb.auth.onAuthStateChange((_e,ses)=>{S.user=ses?ses.user:null;renderAcct();if(S.view==="hist")renderHist()});
+  const sel=$("srcSel");if(!sel.querySelector('[value="acct"]'))sel.insertBefore(new Option("Akun saya (jatah harian gratis)","acct"),sel.firstChild);
+  let saved="";try{saved=localStorage.getItem("apes_src")||""}catch(e){}sel.value=saved||"acct";vis();renderAcct()}
+async function getToken(){if(!sb)return"";const{data}=await sb.auth.getSession();return data.session?data.session.access_token:""}
+async function sendLink(){const em=($("acctMail").value||"").trim();if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em))return toast("Email tidak valid");
+  const{error}=await sb.auth.signInWithOtp({email:em,options:{emailRedirectTo:location.origin+location.pathname}});toast(error?"Gagal mengirim: "+error.message:"Link masuk dikirim. Cek email Anda ✓")}
+function renderAcct(){const b=$("acctBox");if(!b)return;if(!sb){b.replaceChildren();return}
+  if(!S.user){b.replaceChildren(el("label",{for:"acctMail"},"Email untuk masuk"),el("input",{type:"email",id:"acctMail",autocomplete:"email",maxlength:"120",placeholder:"nama@email.com"}),el("button",{style:"margin-top:8px",class:"on",onclick:sendLink},"Kirim link masuk"),el("div",{class:"msg warn",style:"font-size:12px"},"Kami mengirim link ke email Anda; klik link itu di perangkat ini untuk masuk. Akun memberi jatah analisis harian gratis dan riwayat tersimpan di akun. Hanya teks hasil yang disimpan, bukan gambar."));return}
+  const q=S.quota;const cb=el("input",{type:"checkbox",style:"width:auto",onchange:e=>{S.cloud=e.target.checked}});cb.checked=S.cloud!==false;
+  b.replaceChildren(el("div",{class:"msg ok"},"Masuk sebagai "+S.user.email+(q?` · terpakai ${q.used}/${q.limit} hari ini`:"")),el("label",{},cb," Simpan hasil di akun saya"),
+    el("div",{class:"acts",style:"display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"},el("button",{onclick:async()=>{await sb.auth.signOut();S.quota=null}},"Keluar"),
+      el("button",{onclick:async()=>{if(!confirm("Hapus SEMUA riwayat hasil di akun Anda? Tindakan ini permanen."))return;const{error}=await sb.from("analyses").delete().eq("user_id",S.user.id);toast(error?"Gagal menghapus":"Data akun dihapus ✓");loadCloudHist()}},"Hapus semua data cloud")))}
+async function saveCloud(){if(!sb||!S.user||S.cloud===false||S.demo||!S.res)return;
+  const{error}=await sb.from("analyses").insert({kind:S.kind,platform:AnalysisSettings.read().platform,medium:String(S.res.medium||"").slice(0,80),result:S.res});if(error)toast("Gagal menyimpan ke akun")}
+async function loadCloudHist(){const b=$("cloudBox");if(!b)return;if(!sb||!S.user){b.replaceChildren();return}
+  const h3=el("h3",{style:"margin-top:16px"},"Riwayat akun (cloud)");b.replaceChildren(h3,el("div",{class:"empty"},"Memuat…"));
+  const{data,error}=await sb.from("analyses").select("id,created_at,kind,platform,result").order("created_at",{ascending:false}).limit(20);
+  if(error){b.replaceChildren(h3,el("div",{class:"msg err"},"Gagal memuat riwayat akun."));return}
+  b.replaceChildren(h3,...(data.length?data.map(h=>el("div",{class:"hist"},el("span",{},new Date(h.created_at).toLocaleString()+" · "+h.kind+" · "+(h.platform||"")),el("span",{},
+    el("button",{onclick:()=>{S.res=h.result;S.demo=false;S.kind=h.kind;S.edits={};S.cmp={};S.tab=0;S.view="work";show();render()}},"Buka")," ",
+    el("button",{onclick:async()=>{await sb.from("analyses").delete().eq("id",h.id);loadCloudHist()}},"Hapus")))):[el("div",{class:"empty"},"Belum ada riwayat akun.")]))}
+Components.AccountPanel={initAccount,getToken,renderAcct,saveCloud,loadCloudHist};Object.assign(window,Components.AccountPanel);
 })();
 
 /* ===== Component: SettingsPanel ===== */
@@ -348,8 +383,8 @@ function refreshSettings(){$("accWrap").classList.toggle("hide",!S.api);$("s1").
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k)||"";localStorage.setItem(k,v)}catch(e){return ""}}
 function ss(k,v){try{if(v===undefined)return sessionStorage.getItem(k)||"";sessionStorage.setItem(k,v)}catch(e){return ""}}
 const rem=()=>ls("apes_rem")==="1";
-function getAiCfg(){return{own:$("srcSel").value==="own",key:$("ownKey").value.trim(),prov:$("ownProv").value,model:$("ownModel").value.trim(),code:$("accCode").value.trim()}}
-function vis(){const o=$("srcSel").value==="own";$("ownBox").classList.toggle("hide",!o);$("srvBox").classList.toggle("hide",o)}
+function getAiCfg(){return{src:$("srcSel").value,own:$("srcSel").value==="own",key:$("ownKey").value.trim(),prov:$("ownProv").value,model:$("ownModel").value.trim(),code:$("accCode").value.trim()}}
+function vis(){const v=$("srcSel").value;$("ownBox").classList.toggle("hide",v!=="own");$("srvBox").classList.toggle("hide",v!=="server");$("acctBox").classList.toggle("hide",v!=="acct")}
 $("srcSel").value=ls("apes_src")||"own";$("ownProv").value=ls("apes_prov")||"gemini";$("ownModel").value=ls("apes_model");$("accCode").value=ls("apes_code");$("ownRem").checked=rem();$("ownKey").value=rem()?ls("apes_key"):ss("apes_key");vis();
 $("srcSel").onchange=()=>{ls("apes_src",$("srcSel").value);vis()};
 $("ownProv").onchange=()=>ls("apes_prov",$("ownProv").value);
@@ -358,13 +393,13 @@ $("accCode").oninput=()=>ls("apes_code",$("accCode").value.trim());
 $("ownKey").oninput=()=>{const v=$("ownKey").value.trim();if(rem())ls("apes_key",v);else ss("apes_key",v)};
 $("ownRem").onchange=()=>{const on=$("ownRem").checked,v=$("ownKey").value.trim();ls("apes_rem",on?"1":"0");if(on){ls("apes_key",v);try{sessionStorage.removeItem("apes_key")}catch(e){}}else{try{localStorage.removeItem("apes_key")}catch(e){}ss("apes_key",v)}};
 $("saveH").onchange=()=>toast($("saveH").checked?"Riwayat aktif":"Riwayat dimatikan");
-Components.SettingsPanel={refreshSettings,getAiCfg};Object.assign(window,Components.SettingsPanel);
+Components.SettingsPanel={refreshSettings,getAiCfg,vis};Object.assign(window,Components.SettingsPanel);
 })();
 
 /* ---------- init ---------- */
 AnalysisSettings.init();
 loadHist();setKind("image");show();badge();
-(async()=>{try{if(window.claude){S.sample=await claude.use("sample");if(S.sample){try{S.imgOK=!!(await S.sample.limits()).images}catch(e){S.imgOK=false}}}}catch(e){S.sample=null}if(!window.claude){S.api=true;S.imgOK=true}badge()})();
+(async()=>{try{if(window.claude){S.sample=await claude.use("sample");if(S.sample){try{S.imgOK=!!(await S.sample.limits()).images}catch(e){S.imgOK=false}}}}catch(e){S.sample=null}if(!window.claude){S.api=true;S.imgOK=true}badge();initAccount()})();
 </script>
 </body>
 </html>
